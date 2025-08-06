@@ -1,0 +1,108 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw data tables from S3 ingestion via Snowpipe
+    database: TEDDY_DATA
+    schema: RAW
+    tables:
+      - name: parcel_data_raw
+        description: Raw parcel data ingested from Regrid API via S3 and Snowpipe
+        columns:
+          - name: file_name
+            description: S3 file name containing the parcel data
+            tests:
+              - not_null
+          - name: file_row_number
+            description: Row number within the source file
+            tests:
+              - not_null
+          - name: raw_data
+            description: Raw JSON data from Regrid API
+            tests:
+              - not_null
+          - name: ingestion_timestamp
+            description: Timestamp when data was ingested into Snowflake
+            tests:
+              - not_null
+          - name: ingestion_type
+            description: Type of ingestion (bulk, api, manual)
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['bulk', 'api', 'manual']
+          - name: county
+            description: County name for the parcel data
+            tests:
+              - not_null
+          - name: chunk_index
+            description: Index of the chunk within the county batch
+          - name: parcel_count
+            description: Number of parcels in this chunk
+            tests:
+              - not_null
+              - dbt_utils.accepted_range:
+                  min_value: 1
+                  max_value: 10000
+
+        # Data freshness test
+        freshness:
+          warn_after: {count: 6, period: hour}
+          error_after: {count: 24, period: hour}
+        
+        # Data volume test
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "count(*) > 0"
+              config:
+                severity: error
+        
+        # Custom test for data quality
+        - name: raw_data_has_parcels
+          description: Ensure raw_data contains parcels array
+          sql: |
+            SELECT COUNT(*)
+            FROM {{ source('raw', 'parcel_data_raw') }}
+            WHERE raw_data:parcels IS NULL 
+               OR ARRAY_SIZE(raw_data:parcels) = 0
+          tests:
+            - dbt_utils.expression_is_true:
+                expression: "count = 0"
+                config:
+                  severity: warn
+
+  - name: monitoring
+    description: Data quality and monitoring tables
+    database: TEDDY_DATA
+    schema: MONITORING
+    tables:
+      - name: data_quality_alerts
+        description: Data quality alerts and issues
+        columns:
+          - name: alert_id
+            description: Unique alert identifier
+            tests:
+              - unique
+              - not_null
+          - name: alert_type
+            description: Type of alert
+            tests:
+              - not_null
+          - name: alert_message
+            description: Alert message details
+            tests:
+              - not_null
+          - name: alert_timestamp
+            description: When the alert was created
+            tests:
+              - not_null
+          - name: severity
+            description: Alert severity level
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['INFO', 'WARNING', 'CRITICAL']
+          - name: resolved
+            description: Whether the alert has been resolved
+            tests:
+              - not_null

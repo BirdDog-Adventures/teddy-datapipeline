@@ -1,0 +1,77 @@
+name: 'teddy_data_pipeline'
+version: '1.0.0'
+config-version: 2
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'teddy_data_pipeline'
+
+# These configurations specify where dbt should look for different types of files.
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"  # directory which will store compiled SQL files
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+# Configuring models
+models:
+  teddy_data_pipeline:
+    # Config indicated by + and applies to all files under models/example/
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: curated
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+
+# Global configurations
+vars:
+  # The `start_date` variable will be accessible in all resources
+  start_date: '2020-01-01'
+  
+  # Parcel data processing configurations
+  parcel_data_retention_days: 90
+  chunk_processing_batch_size: 1000
+  
+  # Data quality thresholds
+  max_error_rate_percent: 5
+  min_records_per_county: 100
+
+# Seeds configuration
+seeds:
+  teddy_data_pipeline:
+    +schema: reference_data
+    county_mappings:
+      +column_types:
+        county_fips: varchar(5)
+        county_name: varchar(100)
+        state_code: varchar(2)
+        state_name: varchar(50)
+
+# Tests configuration
+tests:
+  +store_failures: true
+  +schema: data_quality
+
+# Documentation
+docs-paths: ["docs"]
+
+# Snapshots configuration
+snapshots:
+  teddy_data_pipeline:
+    +target_schema: snapshots
+    +strategy: timestamp
+    +updated_at: updated_at
+
+# Macros configuration
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order: ['teddy_data_pipeline', 'dbt_utils']

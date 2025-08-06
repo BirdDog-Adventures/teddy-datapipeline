@@ -1,0 +1,731 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Teddy Data Pipeline Infrastructure - S3, Lambda, EventBridge, and Snowflake Integration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  RegridApiKey:
+    Type: String
+    NoEcho: true
+    Description: Regrid API Key for parcel data access
+  
+  SnowflakeAccount:
+    Type: String
+    Description: Snowflake account identifier
+  
+  SnowflakeUser:
+    Type: String
+    Description: Snowflake user for data pipeline
+  
+  SnowflakePrivateKey:
+    Type: String
+    NoEcho: true
+    Description: Snowflake private key for JWT authentication (base64 encoded)
+  
+  SnowflakePrivateKeyPassphrase:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Snowflake private key passphrase (optional)
+
+Resources:
+  # S3 Data Lake Bucket
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'teddy-data-lake-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DataLifecycle
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # IAM Role for Lambda Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'TeddyDataPipeline-Lambda-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${DataLakeBucket.Arn}/*'
+                  - !GetAtt DataLakeBucket.Arn
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: 
+                  - !Ref ParcelDataTopic
+                  - !Ref PipelineStatusTopic
+                  - !Ref MonitoringTopic
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt SnowpipeQueue.Arn
+                  - !GetAtt ErrorProcessingQueue.Arn
+                  - !GetAtt BatchProcessingQueue.Arn
+                  - !GetAtt SnowpipeDLQ.Arn
+                  - !GetAtt ErrorProcessingDLQ.Arn
+                  - !GetAtt BatchProcessingDLQ.Arn
+                  - !GetAtt DeadLetterQueue.Arn
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DataPipelineSecrets
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt ParcelCacheTable.Arn
+                  - !GetAtt RateLimitTable.Arn
+                  - !GetAtt ApiMetadataTable.Arn
+
+  # DynamoDB Cache Tables
+  ParcelCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'teddy-parcel-cache-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: TeddyDataPipeline
+
+  # DynamoDB Rate Limiting Table
+  RateLimitTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'teddy-rate-limit-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: api_key
+          AttributeType: S
+        - AttributeName: time_window
+          AttributeType: S
+      KeySchema:
+        - AttributeName: api_key
+          KeyType: HASH
+        - AttributeName: time_window
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: TeddyDataPipeline
+
+  # DynamoDB API Metadata Table
+  ApiMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'teddy-api-metadata-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: metadata_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: metadata_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: TeddyDataPipeline
+
+  # Secrets Manager for API Keys
+  DataPipelineSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'teddy-data-pipeline-secrets-${Environment}'
+      Description: 'API keys and credentials for Teddy Data Pipeline'
+      SecretString: !Sub |
+        {
+          "regrid_api_key": "${RegridApiKey}",
+          "snowflake_account": "${SnowflakeAccount}",
+          "snowflake_user": "${SnowflakeUser}",
+          "snowflake_private_key": "${SnowflakePrivateKey}",
+          "snowflake_private_key_passphrase": "${SnowflakePrivateKeyPassphrase}"
+        }
+
+  # ECR Repository for Lambda Container Images
+  LambdaECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'teddy-data-pipeline-${Environment}'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  # Bulk Parcel Ingestion Lambda Function
+  BulkParcelIngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'teddy-bulk-parcel-ingestion-${Environment}'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              print(f"Bulk parcel ingestion triggered with event: {json.dumps(event)}")
+              
+              # Placeholder implementation
+              # TODO: Replace with actual parcel data ingestion logic
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Bulk parcel ingestion placeholder - ready for implementation',
+                      'environment': os.environ.get('ENVIRONMENT', 'unknown')
+                  })
+              }
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataLakeBucket
+          SECRETS_ARN: !Ref DataPipelineSecrets
+          ENVIRONMENT: !Ref Environment
+          PARCEL_DATA_TOPIC_ARN: !Ref ParcelDataTopic
+          PIPELINE_STATUS_TOPIC_ARN: !Ref PipelineStatusTopic
+          MONITORING_TOPIC_ARN: !Ref MonitoringTopic
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+
+  # API Parcel Ingestion Lambda Function
+  ApiParcelIngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'teddy-api-parcel-ingestion-${Environment}'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              print(f"API parcel ingestion triggered with event: {json.dumps(event)}")
+              
+              # Placeholder implementation
+              # TODO: Replace with actual API parcel data ingestion logic
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'API parcel ingestion placeholder - ready for implementation',
+                      'environment': os.environ.get('ENVIRONMENT', 'unknown')
+                  })
+              }
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataLakeBucket
+          SECRETS_ARN: !Ref DataPipelineSecrets
+          ENVIRONMENT: !Ref Environment
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+
+  # API Gateway for Parcel API
+  ParcelApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'teddy-parcel-api-${Environment}'
+      Description: 'Teddy Parcel Data API'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resource
+  ParcelResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ParcelApiGateway
+      ParentId: !GetAtt ParcelApiGateway.RootResourceId
+      PathPart: 'parcel'
+
+  # API Gateway Method
+  ParcelMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ParcelApiGateway
+      ResourceId: !Ref ParcelResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiParcelIngestionFunction.Arn}/invocations'
+
+  # Lambda Permission for API Gateway
+  ApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiParcelIngestionFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ParcelApiGateway}/*/*'
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ParcelMethod
+    Properties:
+      RestApiId: !Ref ParcelApiGateway
+      StageName: !Ref Environment
+
+  # Step Functions State Machine Role
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'TeddyDataPipeline-StepFunctions-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt BulkParcelIngestionFunction.Arn
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  # Step Functions State Machine
+  DataPipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'teddy-data-pipeline-${Environment}'
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Teddy Data Pipeline - Bulk Parcel Ingestion",
+          "StartAt": "BulkParcelIngestion",
+          "States": {
+            "BulkParcelIngestion": {
+              "Type": "Task",
+              "Resource": "${BulkParcelIngestionFunction.Arn}",
+              "Parameters": {
+                "counties.$": "$.counties",
+                "batch_size.$": "$.batch_size",
+                "chunk_size.$": "$.chunk_size"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyFailure"
+                }
+              ],
+              "Next": "NotifySuccess"
+            },
+            "NotifySuccess": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Message": "Bulk parcel ingestion completed successfully"
+              },
+              "End": true
+            },
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Message": "Bulk parcel ingestion failed"
+              },
+              "End": true
+            }
+          }
+        }
+
+  # EventBridge Rule for S3 Events
+  S3EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'teddy-s3-parcel-events-${Environment}'
+      Description: 'Route S3 parcel data events to Snowpipe'
+      EventPattern:
+        source: ['aws.s3']
+        detail-type: ['Object Created']
+        detail:
+          bucket:
+            name: [!Ref DataLakeBucket]
+          object:
+            key:
+              - prefix: 'raw/parcel/'
+      Targets:
+        - Arn: !Ref SnowpipeNotificationTopic
+          Id: 'SnowpipeTarget'
+
+  # SNS Topics for Event Publishing
+  ParcelDataTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'teddy-parcel-data-${Environment}'
+      DisplayName: 'Teddy Parcel Data Processing Events'
+      KmsMasterKeyId: alias/aws/sns
+
+  PipelineStatusTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'teddy-pipeline-status-${Environment}'
+      DisplayName: 'Teddy Pipeline Status Events'
+      KmsMasterKeyId: alias/aws/sns
+
+  MonitoringTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'teddy-monitoring-${Environment}'
+      DisplayName: 'Teddy Monitoring and Alerts'
+      KmsMasterKeyId: alias/aws/sns
+
+  # SQS Queues for Event Processing
+  SnowpipeQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-snowpipe-${Environment}'
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SnowpipeDLQ.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  SnowpipeDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-snowpipe-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  ErrorProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-error-processing-${Environment}'
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ErrorProcessingDLQ.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  ErrorProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-error-processing-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  BatchProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-batch-processing-${Environment}.fifo'
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 900  # 15 minutes for batch processing
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BatchProcessingDLQ.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  BatchProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-batch-processing-dlq-${Environment}.fifo'
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # SNS to SQS Subscriptions
+  SnowpipeSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ParcelDataTopic
+      Protocol: sqs
+      Endpoint: !GetAtt SnowpipeQueue.Arn
+      FilterPolicy:
+        event_type: ["s3_upload", "data_ready"]
+
+  ErrorProcessingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PipelineStatusTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ErrorProcessingQueue.Arn
+      FilterPolicy:
+        status: ["error", "failed"]
+
+  MonitoringSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref MonitoringTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ErrorProcessingQueue.Arn
+
+  # SQS Queue Policies to allow SNS to send messages
+  SnowpipeQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SnowpipeQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt SnowpipeQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ParcelDataTopic
+
+  ErrorProcessingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ErrorProcessingQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ErrorProcessingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: 
+                  - !Ref PipelineStatusTopic
+                  - !Ref MonitoringTopic
+
+  # SNS Topic for Notifications (Legacy - keeping for compatibility)
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'teddy-pipeline-notifications-${Environment}'
+      DisplayName: 'Teddy Data Pipeline Notifications'
+
+  # SNS Topic for Snowpipe Notifications (Legacy - keeping for compatibility)
+  SnowpipeNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'teddy-snowpipe-notifications-${Environment}'
+      DisplayName: 'Teddy Snowpipe S3 Notifications'
+
+  # SQS Dead Letter Queue
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'teddy-pipeline-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  # EventBridge Rule for Daily Pipeline Execution
+  DailyPipelineRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'teddy-daily-pipeline-${Environment}'
+      Description: 'Trigger daily bulk parcel data ingestion'
+      ScheduleExpression: 'cron(0 6 * * ? *)'  # 6 AM daily
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DataPipelineStateMachine.Arn
+          Id: 'DailyPipelineTarget'
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          Input: |
+            {
+              "counties": ["harris", "travis", "williamson"],
+              "batch_size": 1000,
+              "chunk_size": 500
+            }
+
+  # EventBridge Role
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'TeddyDataPipeline-EventBridge-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !GetAtt DataPipelineStateMachine.Arn
+
+  # CloudWatch Log Group for Lambda Functions
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/teddy-data-pipeline-${Environment}'
+      RetentionInDays: 30
+
+Outputs:
+  DataLakeBucketName:
+    Description: 'S3 Data Lake Bucket Name'
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataLakeBucket'
+
+  ApiGatewayUrl:
+    Description: 'API Gateway URL for Parcel API'
+    Value: !Sub 'https://${ParcelApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiUrl'
+
+  StateMachineArn:
+    Description: 'Step Functions State Machine ARN'
+    Value: !GetAtt DataPipelineStateMachine.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachine'
+
+  ECRRepositoryUri:
+    Description: 'ECR Repository URI for Lambda images'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${LambdaECRRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepository'
+
+  SnowpipeNotificationTopicArn:
+    Description: 'SNS Topic ARN for Snowpipe notifications'
+    Value: !Ref SnowpipeNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SnowpipeTopic'
