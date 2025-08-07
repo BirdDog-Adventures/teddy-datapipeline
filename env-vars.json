@@ -1,0 +1,6 @@
+{
+    "Variables": {
+        "ENVIRONMENT": "dev",
+        "DATA_BUCKET": "teddy-data-lake-dev"
+    }
+}

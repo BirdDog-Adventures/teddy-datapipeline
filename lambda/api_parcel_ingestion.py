@@ -14,17 +14,30 @@ from typing import Dict, Any, Optional
 import sys
 sys.path.append('/opt')
 from clients.regrid import RegridClient
-from utils.snowflake_connector import SnowflakeConnector
+from utils.snowflake_jwt_connector import SnowflakeJWTConnector
 from utils.dynamodb_cache import DynamoDBCacheManager
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize clients
-regrid_client = RegridClient(api_key=os.environ['REGRID_API_KEY'])
+# Initialize clients - get REGRID_API_KEY from secrets
+def get_regrid_api_key():
+    try:
+        secrets_client = boto3.client('secretsmanager')
+        secret_name = f'teddy-data-pipeline-secrets-{os.environ.get("ENVIRONMENT", "dev")}'
+        response = secrets_client.get_secret_value(SecretId=secret_name)
+        secrets = json.loads(response['SecretString'])
+        return secrets.get('REGRID_API_KEY', 'test_key_placeholder')
+    except Exception as e:
+        logger.warning(f"Could not get REGRID_API_KEY from secrets: {e}")
+        return os.environ.get('REGRID_API_KEY', 'test_key_placeholder')
+
+regrid_api_key = get_regrid_api_key()
+regrid_client = RegridClient(api_key=regrid_api_key)
 s3_client = boto3.client('s3')
-eventbridge = boto3.client('events')
+sns_client = boto3.client('sns')  # Replace EventBridge with SNS
+sqs_client = boto3.client('sqs')  # Add SQS client
 cache_manager = DynamoDBCacheManager(environment=os.environ.get('ENVIRONMENT', 'dev'))
 
 def lambda_handler(event, context):
@@ -34,16 +47,50 @@ def lambda_handler(event, context):
     """
     
     try:
-        # Parse request
-        body = json.loads(event.get('body', '{}'))
+        # Parse request - handle both API Gateway and direct Lambda invocation
+        if 'body' in event:
+            # API Gateway format: {"body": "{\"type\":\"coordinates\",...}"}
+            body = json.loads(event.get('body', '{}'))
+        else:
+            # Direct Lambda console format: {"type":"coordinates",...}
+            body = event
+        
+        logger.info(f"Parsed request body: {body}")
         query_type = body.get('type')  # 'address', 'coordinates', 'parcel_id'
         
-        # Validate input
+        # Auto-detect query type if not provided
         if not query_type:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'Missing query type'})
-            }
+            logger.info(f"Auto-detecting query type from body: {body}")
+            if body.get('coordinates') and isinstance(body.get('coordinates'), list) and len(body.get('coordinates')) == 2:
+                query_type = 'coordinates'
+                coords = body['coordinates']
+                # Handle both [lat, lon] and [lon, lat] formats
+                # Check if first value looks like latitude (between -90 and 90)
+                if -90 <= coords[0] <= 90 and abs(coords[1]) > 90:
+                    # Format: [latitude, longitude]
+                    body['latitude'] = coords[0]
+                    body['longitude'] = coords[1]
+                elif -90 <= coords[1] <= 90 and abs(coords[0]) > 90:
+                    # Format: [longitude, latitude] (GeoJSON standard)
+                    body['latitude'] = coords[1]
+                    body['longitude'] = coords[0]
+                else:
+                    # Default assumption: [latitude, longitude]
+                    body['latitude'] = coords[0]
+                    body['longitude'] = coords[1]
+                logger.info(f"Auto-detected coordinates: lat={body['latitude']}, lon={body['longitude']}")
+            elif body.get('address') and body.get('address').strip():
+                query_type = 'address'
+                logger.info("Auto-detected address query")
+            elif body.get('parcel_id') and body.get('parcel_id').strip():
+                query_type = 'parcel_id'
+                logger.info("Auto-detected parcel_id query")
+            else:
+                logger.warning(f"Unable to auto-detect query type from: {body}")
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({'error': 'Missing query type or unable to auto-detect from request'})
+                }
         
         # Generate cache key
         cache_key = generate_cache_key(query_type, body)
@@ -71,7 +118,7 @@ def lambda_handler(event, context):
                     'statusCode': 400,
                     'body': json.dumps({'error': 'Missing address parameter'})
                 }
-            parcel_data = regrid_client.search_by_address(address, limit=1)
+            parcel_data = regrid_client.get_parcel_by_address(address)
             
         elif query_type == 'coordinates':
             lat = body.get('latitude')
@@ -81,7 +128,7 @@ def lambda_handler(event, context):
                     'statusCode': 400,
                     'body': json.dumps({'error': 'Missing latitude or longitude'})
                 }
-            parcel_data = regrid_client.search_by_coordinates(lat, lon)
+            parcel_data = regrid_client.get_parcel_by_coordinates(lat, lon)
             
         elif query_type == 'parcel_id':
             parcel_id = body.get('parcel_id')
@@ -127,36 +174,46 @@ def lambda_handler(event, context):
         )
         
         # Load data to Snowflake in real-time
+        logger.info("Starting Snowflake connection attempt...")
         try:
-            snowflake_connector = SnowflakeConnector()
-            if snowflake_connector.connect():
-                # Extract county and state from parcel data
-                county = extract_county_from_parcel_data(parcel_data)
-                state = extract_state_from_parcel_data(parcel_data)
-                
-                # Insert raw data
-                snowflake_connector.insert_raw_data(s3_key, county, state, response_data)
-                
-                # Insert staging data
-                if isinstance(parcel_data, list) and len(parcel_data) > 0:
-                    snowflake_connector.insert_staging_data(county, state, parcel_data)
-                elif isinstance(parcel_data, dict):
-                    snowflake_connector.insert_staging_data(county, state, [parcel_data])
-                
-                snowflake_connector.close()
-                logger.info(f"Successfully loaded API data to Snowflake: {cache_key}")
-            else:
-                logger.warning("Failed to connect to Snowflake for real-time loading")
+            logger.info("Creating SnowflakeConnector instance...")
+            with SnowflakeJWTConnector() as snowflake_connector:
+                logger.info("SnowflakeConnector created successfully, testing connection...")
+                # Test connection first
+                test_result = snowflake_connector.test_connection()
+                logger.info(f"Snowflake test_connection returned: {test_result}")
+                if test_result['status'] == 'success':
+                    logger.info(f"✅ Successfully connected to Snowflake for API data: {cache_key}")
+                    logger.info(f"Connection info: {test_result['connection_info']}")
+                    
+                    # Insert data into Snowflake
+                    try:
+                        county = extract_county_from_parcel_data(parcel_data)
+                        state = extract_state_from_parcel_data(parcel_data)
+                        
+                        rows_inserted = snowflake_connector.insert_raw_data(
+                            s3_key=s3_key,
+                            county=county, 
+                            state=state,
+                            data=response_data
+                        )
+                        logger.info(f"✅ Successfully inserted {rows_inserted} rows to Snowflake for {cache_key}")
+                        
+                    except Exception as insert_error:
+                        logger.error(f"❌ Error inserting to Snowflake: {str(insert_error)}")
+                        
+                else:
+                    logger.warning(f"❌ Failed to connect to Snowflake: {test_result.get('error', 'Unknown error')}")
         except Exception as sf_error:
-            logger.error(f"Snowflake loading error: {str(sf_error)}")
+            logger.error(f"❌ Snowflake loading error: {str(sf_error)}")
             # Continue processing even if Snowflake fails
         
         # Cache result in DynamoDB (24 hour TTL)
         cache_manager.cache_parcel_data(cache_key, response_data, ttl_hours=24)
         
-        # Publish event for real-time processing
-        publish_api_event(eventbridge, {
-            'bucket': os.environ['DATA_BUCKET'],
+        # Publish event for real-time processing using SNS
+        publish_api_event(sns_client, {
+            'bucket': os.environ.get('DATA_BUCKET', 'teddy-data-pipeline-dev'),
             's3_key': s3_key,
             'query_type': query_type,
             'cache_key': cache_key,
@@ -175,8 +232,8 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"Error in API ingestion: {str(e)}")
         
-        # Publish error event
-        publish_error_event(eventbridge, {
+        # Publish error event using SNS
+        publish_error_event(sns_client, {
             'error': str(e),
             'request_body': body,
             'ingestion_type': 'api'
@@ -200,29 +257,45 @@ def generate_cache_key(query_type: str, body: Dict[str, Any]) -> str:
     else:
         return f"parcel:unknown:{hash(str(body))}"
 
-def publish_api_event(eventbridge, detail):
-    """Publish API event for real-time processing"""
-    eventbridge.put_events(
-        Entries=[
-            {
-                'Source': 'birddog.parcel-api',
-                'DetailType': 'Parcel API Request',
-                'Detail': json.dumps(detail)
-            }
-        ]
-    )
+def publish_api_event(sns_client, detail):
+    """Publish API event for real-time processing using SNS"""
+    try:
+        # Use SNS to publish event (will need topic ARN in environment)
+        topic_arn = os.environ.get('PARCEL_PROCESSING_TOPIC_ARN')
+        if topic_arn:
+            sns_client.publish(
+                TopicArn=topic_arn,
+                Message=json.dumps({
+                    'Source': 'birddog.parcel-api',
+                    'DetailType': 'Parcel API Request',
+                    'Detail': detail
+                }),
+                Subject='Parcel API Request'
+            )
+        else:
+            logger.info(f"SNS topic not configured, would publish: {detail}")
+    except Exception as e:
+        logger.error(f"Failed to publish API event via SNS: {e}")
 
-def publish_error_event(eventbridge, detail):
-    """Publish error event for monitoring"""
-    eventbridge.put_events(
-        Entries=[
-            {
-                'Source': 'birddog.parcel-api',
-                'DetailType': 'Parcel API Error',
-                'Detail': json.dumps(detail)
-            }
-        ]
-    )
+def publish_error_event(sns_client, detail):
+    """Publish error event for monitoring using SNS"""
+    try:
+        # Use SNS to publish error event
+        error_topic_arn = os.environ.get('ERROR_TOPIC_ARN')
+        if error_topic_arn:
+            sns_client.publish(
+                TopicArn=error_topic_arn,
+                Message=json.dumps({
+                    'Source': 'birddog.parcel-api',
+                    'DetailType': 'Parcel API Error',
+                    'Detail': detail
+                }),
+                Subject='Parcel API Error'
+            )
+        else:
+            logger.warning(f"Error topic not configured, would publish error: {detail}")
+    except Exception as e:
+        logger.error(f"Failed to publish error event via SNS: {e}")
 
 def extract_county_from_parcel_data(parcel_data):
     """Extract county from parcel data"""
