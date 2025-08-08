@@ -106,8 +106,8 @@ class NLCDClientTester:
                 # Test if NLCD tables exist
                 required_tables = [
                     'LAND_COVER_CLASSES',
-                    'PARCEL_LAND_COVER',
-                    'PARCEL_LAND_COVER_SUMMARY',
+                    'LAND_COVER',
+                    'LAND_COVER_SUMMARY',
                     'PROCESSING_STATUS'
                 ]
                 
@@ -295,12 +295,12 @@ class NLCDClientTester:
         
         try:
             with get_snowflake_connector(self.environment) as sf:
-                # Check for any data in PARCEL_LAND_COVER
+                # Check for any data in LAND_COVER
                 result = sf.execute_query("""
                     SELECT COUNT(*) as count,
                            COUNT(DISTINCT PARCEL_ID) as unique_parcels,
                            COUNT(DISTINCT NLCD_CODE) as unique_codes
-                    FROM TEDDY_DATA.RAW.PARCEL_LAND_COVER
+                    FROM TEDDY_DATA.RAW.LAND_COVER
                 """)
                 
                 if result and result[0]['COUNT'] > 0:
@@ -314,7 +314,7 @@ class NLCDClientTester:
                             COUNT(*) as total_records,
                             COUNT(CASE WHEN COVERAGE_PERCENTAGE BETWEEN 0 AND 100 THEN 1 END) as valid_percentages,
                             COUNT(CASE WHEN NLCD_CODE IN (SELECT NLCD_CODE FROM TEDDY_DATA.RAW.LAND_COVER_CLASSES) THEN 1 END) as valid_codes
-                        FROM TEDDY_DATA.RAW.PARCEL_LAND_COVER
+                        FROM TEDDY_DATA.RAW.LAND_COVER
                     """)
                     
                     if integrity_check:

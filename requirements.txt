@@ -8,8 +8,8 @@ botocore>=1.34.0
 # Snowflake connector with JWT support
 snowflake-connector-python>=3.6.0
 
-# Cryptography for JWT (proven working version)
-cryptography>=41.0.0
+# Cryptography for JWT (Lambda compatible version)
+cryptography>=3.4.8,<4.0.0
 
 # HTTP requests
 requests>=2.31.0

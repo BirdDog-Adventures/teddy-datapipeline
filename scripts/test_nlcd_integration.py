@@ -118,8 +118,8 @@ class NLCDIntegrationTester:
                 # Check required tables
                 required_tables = [
                     'LAND_COVER_CLASSES',
-                    'PARCEL_LAND_COVER',
-                    'PARCEL_LAND_COVER_SUMMARY',
+                    'LAND_COVER',
+                    'LAND_COVER_SUMMARY',
                     'PROCESSING_STATUS'
                 ]
                 
@@ -382,7 +382,7 @@ class NLCDIntegrationTester:
                 # Test the JSON function with a sample parcel
                 parcels = sf.execute_query("""
                     SELECT PARCEL_ID 
-                    FROM TEDDY_DATA.LAND_COVER.PARCEL_LAND_COVER_SUMMARY 
+                    FROM TEDDY_DATA.LAND_COVER.LAND_COVER_SUMMARY 
                     LIMIT 1
                 """)
                 
@@ -398,7 +398,7 @@ class NLCDIntegrationTester:
                 
                 # Test the JSON function
                 json_result = sf.execute_query("""
-                    SELECT TEDDY_DATA.LAND_COVER.FN_GET_PARCEL_LAND_COVER_JSON(%s) as json_data
+                    SELECT TEDDY_DATA.LAND_COVER.FN_GET_LAND_COVER_JSON(%s) as json_data
                 """, {'1': test_parcel_id})
                 
                 if not json_result or not json_result[0]['JSON_DATA']:

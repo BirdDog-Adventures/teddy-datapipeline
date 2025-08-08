@@ -295,6 +295,45 @@ Resources:
       DeadLetterConfig:
         TargetArn: !GetAtt DeadLetterQueue.Arn
 
+  # NLCD Parcel Processor Lambda Function
+  NLCDParcelProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'teddy-nlcd-parcel-processor-${Environment}'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              print(f"NLCD parcel processor triggered with event: {json.dumps(event)}")
+              
+              # Placeholder implementation
+              # TODO: Replace with actual NLCD processing logic
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'NLCD parcel processor placeholder - ready for implementation',
+                      'environment': os.environ.get('ENVIRONMENT', 'unknown')
+                  })
+              }
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataLakeBucket
+          SECRETS_ARN: !Ref DataPipelineSecrets
+          ENVIRONMENT: !Ref Environment
+          NLCD_YEAR: '2021'
+          FORCE_REFRESH: 'false'
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+
   # API Parcel Ingestion Lambda Function
   ApiParcelIngestionFunction:
     Type: AWS::Lambda::Function
@@ -594,6 +633,25 @@ Resources:
       TopicArn: !Ref MonitoringTopic
       Protocol: sqs
       Endpoint: !GetAtt ErrorProcessingQueue.Arn
+
+  # SNS to Lambda Subscription for NLCD Processing
+  NLCDProcessingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ParcelDataTopic
+      Protocol: lambda
+      Endpoint: !GetAtt NLCDParcelProcessorFunction.Arn
+      FilterPolicy:
+        ingestion_type: ["api"]
+
+  # Lambda Permission for SNS to invoke NLCD processor
+  NLCDProcessorSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NLCDParcelProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref ParcelDataTopic
 
   # SQS Queue Policies to allow SNS to send messages
   SnowpipeQueuePolicy:

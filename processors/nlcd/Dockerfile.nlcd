@@ -1,0 +1,24 @@
+# Docker build for NLCD Lambda function  
+FROM public.ecr.aws/lambda/python:3.9
+
+# Copy NLCD Lambda function code
+COPY processors/nlcd/nlcd_parcel_processor.py ${LAMBDA_TASK_ROOT}/
+COPY processors/nlcd/nlcd_client.py ${LAMBDA_TASK_ROOT}/
+COPY processors/nlcd/unified_nlcd_processor.py ${LAMBDA_TASK_ROOT}/
+COPY processors/shared/utils/ ${LAMBDA_TASK_ROOT}/shared/utils/
+COPY processors/shared/clients/ ${LAMBDA_TASK_ROOT}/shared/clients/
+
+# Copy RSA keys for JWT authentication
+RUN mkdir -p ${LAMBDA_TASK_ROOT}/keys
+COPY keys/snowflake_rsa_key.p8 ${LAMBDA_TASK_ROOT}/keys/
+
+# Install dependencies
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Set environment variables for JWT authentication
+ENV SNOWFLAKE_PRIVATE_KEY_PATH=${LAMBDA_TASK_ROOT}/keys/snowflake_rsa_key.p8
+ENV SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT
+
+# Lambda handler
+CMD ["nlcd_parcel_processor.lambda_handler"]

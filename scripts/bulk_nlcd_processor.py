@@ -141,7 +141,7 @@ class BulkNLCDProcessor:
                         p.ACRES,
                         p.GEOMETRY_JSON
                     FROM TEDDY_DATA.RAW.PARCEL_PROFILES p
-                    LEFT JOIN TEDDY_DATA.LAND_COVER.PARCEL_LAND_COVER_SUMMARY s 
+                    LEFT JOIN TEDDY_DATA.LAND_COVER.LAND_COVER_SUMMARY s 
                         ON p.PARCEL_ID = s.PARCEL_ID
                     WHERE p.STATE = %s
                     AND p.LATITUDE IS NOT NULL 

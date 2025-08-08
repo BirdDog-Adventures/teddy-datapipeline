@@ -1,0 +1,347 @@
+-- Topography/Elevation Schema Setup for TEDDY_DATA Database
+-- This script creates the topography tables in the RAW schema
+-- Run this script to set up the database structure for topography integration
+
+-- Use the RAW schema (assuming it already exists)
+USE SCHEMA TEDDY_DATA.RAW;
+
+-- Create TOPOGRAPHY main data table
+CREATE OR REPLACE TABLE TOPOGRAPHY (
+    TOPO_ID INTEGER AUTOINCREMENT PRIMARY KEY,                    -- 1. Primary key
+    PARCEL_ID VARCHAR(100) NOT NULL,                             -- 2. Parcel identifier
+    MEAN_ELEVATION_FT DECIMAL(10,2),                            -- 3. Mean elevation in feet
+    MIN_ELEVATION_FT DECIMAL(10,2),                             -- 4. Minimum elevation in feet  
+    MAX_ELEVATION_FT DECIMAL(10,2),                             -- 5. Maximum elevation in feet
+    ELEVATION_VARIANCE_FT DECIMAL(15,6),                        -- 6. Elevation variance in feet
+    SLOPE_PERCENT DECIMAL(5,2),                                 -- 7. Slope percentage
+    TERRAIN_ANALYSIS VARCHAR(500),                              -- 8. Terrain analysis description
+    DATA_SOURCE VARCHAR(100) NOT NULL DEFAULT 'USGS 3DEP',     -- 9. Data source
+    RESOLUTION VARCHAR(50),                                     -- 10. Resolution details
+    COLLECTION_METHOD VARCHAR(100),                             -- 11. Collection method
+    COLLECTION_DATE DATE,                                       -- 12. Collection date
+    LATITUDE DECIMAL(10,8) NOT NULL,                           -- 13. Latitude coordinate
+    LONGITUDE DECIMAL(11,8) NOT NULL,                          -- 14. Longitude coordinate
+    COUNTY_ID VARCHAR(50),                                      -- 15. County identifier
+    STATE_CODE VARCHAR(2),                                      -- 16. State code
+    
+    -- Additional fields for processing
+    ELEVATION_UNITS VARCHAR(20) NOT NULL DEFAULT 'Feet',
+    PROCESSING_METHOD VARCHAR(50) NOT NULL DEFAULT 'USGS_API', -- 'USGS_API', 'bulk_points', 'raster_download'
+    CONFIDENCE_SCORE DECIMAL(3,2) DEFAULT 1.0,
+    API_RESPONSE_JSON VARIANT,
+    CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Create TOPOGRAPHY_SUMMARY for aggregated elevation statistics per parcel
+CREATE OR REPLACE TABLE TOPOGRAPHY_SUMMARY (
+    PARCEL_ID VARCHAR(100) PRIMARY KEY,
+    ELEVATION_MIN DECIMAL(10,2),
+    ELEVATION_MAX DECIMAL(10,2),
+    ELEVATION_MEAN DECIMAL(10,2),
+    ELEVATION_MEDIAN DECIMAL(10,2),
+    ELEVATION_STD DECIMAL(10,2),
+    ELEVATION_UNITS VARCHAR(20) NOT NULL DEFAULT 'Meters',
+    ELEVATION_POINTS_COUNT INTEGER DEFAULT 1,
+    SLOPE_DEGREES DECIMAL(5,2),
+    ASPECT_DEGREES DECIMAL(5,2),
+    TERRAIN_ROUGHNESS DECIMAL(10,6),
+    DATA_SOURCE VARCHAR(100) NOT NULL DEFAULT 'USGS 3DEP',
+    PROCESSING_METHOD VARCHAR(50) NOT NULL DEFAULT 'USGS_API',
+    LAST_PROCESSED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Create ELEVATION_PROFILES table for linear elevation profiles (optional, for future use)
+CREATE OR REPLACE TABLE ELEVATION_PROFILES (
+    ID INTEGER AUTOINCREMENT PRIMARY KEY,
+    PROFILE_ID VARCHAR(100) NOT NULL,
+    PARCEL_ID VARCHAR(100),
+    SEQUENCE_NUMBER INTEGER NOT NULL,
+    LATITUDE DECIMAL(10,8) NOT NULL,
+    LONGITUDE DECIMAL(11,8) NOT NULL,
+    ELEVATION DECIMAL(10,2),
+    DISTANCE_FROM_START_METERS DECIMAL(10,2),
+    ELEVATION_UNITS VARCHAR(20) NOT NULL DEFAULT 'Meters',
+    DATA_SOURCE VARCHAR(100) NOT NULL DEFAULT 'USGS 3DEP',
+    CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Create TERRAIN_ANALYSIS table for advanced terrain metrics (optional, for future use)
+CREATE OR REPLACE TABLE TERRAIN_ANALYSIS (
+    ID INTEGER AUTOINCREMENT PRIMARY KEY,
+    PARCEL_ID VARCHAR(100) NOT NULL,
+    WATERSHED_ID VARCHAR(100),
+    DRAINAGE_AREA_SQKM DECIMAL(15,6),
+    FLOW_ACCUMULATION INTEGER,
+    FLOW_DIRECTION INTEGER,
+    CURVATURE_PLAN DECIMAL(10,6),
+    CURVATURE_PROFILE DECIMAL(10,6),
+    TOPOGRAPHIC_WETNESS_INDEX DECIMAL(10,6),
+    TOPOGRAPHIC_POSITION_INDEX DECIMAL(10,6),
+    TERRAIN_RUGGEDNESS_INDEX DECIMAL(10,6),
+    VIEWSHED_AREA_SQKM DECIMAL(15,6),
+    SOLAR_RADIATION_POTENTIAL DECIMAL(15,6),
+    DATA_SOURCE VARCHAR(100) NOT NULL DEFAULT 'USGS 3DEP',
+    PROCESSING_METHOD VARCHAR(50) NOT NULL DEFAULT 'DERIVED',
+    CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Create indexes for performance
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_PARCEL_ID ON TOPOGRAPHY(PARCEL_ID);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_COORDINATES ON TOPOGRAPHY(LATITUDE, LONGITUDE);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_ELEVATION ON TOPOGRAPHY(MEAN_ELEVATION_FT);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_STATE ON TOPOGRAPHY(STATE_CODE);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_COUNTY ON TOPOGRAPHY(COUNTY_ID);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_CREATED ON TOPOGRAPHY(CREATED_AT);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_UPDATED ON TOPOGRAPHY(UPDATED_AT);
+
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_SUMMARY_PARCEL_ID ON TOPOGRAPHY_SUMMARY(PARCEL_ID);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_SUMMARY_ELEVATION ON TOPOGRAPHY_SUMMARY(ELEVATION_MEAN);
+CREATE INDEX IF NOT EXISTS IDX_TOPOGRAPHY_SUMMARY_PROCESSED ON TOPOGRAPHY_SUMMARY(LAST_PROCESSED_AT);
+
+CREATE INDEX IF NOT EXISTS IDX_ELEVATION_PROFILES_PROFILE_ID ON ELEVATION_PROFILES(PROFILE_ID);
+CREATE INDEX IF NOT EXISTS IDX_ELEVATION_PROFILES_PARCEL_ID ON ELEVATION_PROFILES(PARCEL_ID);
+CREATE INDEX IF NOT EXISTS IDX_ELEVATION_PROFILES_SEQUENCE ON ELEVATION_PROFILES(PROFILE_ID, SEQUENCE_NUMBER);
+
+CREATE INDEX IF NOT EXISTS IDX_TERRAIN_ANALYSIS_PARCEL_ID ON TERRAIN_ANALYSIS(PARCEL_ID);
+CREATE INDEX IF NOT EXISTS IDX_TERRAIN_ANALYSIS_WATERSHED ON TERRAIN_ANALYSIS(WATERSHED_ID);
+
+-- Create views for common queries
+CREATE OR REPLACE VIEW VW_TOPOGRAPHY_DETAIL AS
+SELECT 
+    t.TOPO_ID,
+    t.PARCEL_ID,
+    t.MEAN_ELEVATION_FT,
+    t.MIN_ELEVATION_FT,
+    t.MAX_ELEVATION_FT,
+    t.ELEVATION_VARIANCE_FT,
+    t.SLOPE_PERCENT,
+    t.TERRAIN_ANALYSIS,
+    t.DATA_SOURCE,
+    t.RESOLUTION,
+    t.COLLECTION_METHOD,
+    t.COLLECTION_DATE,
+    t.LATITUDE,
+    t.LONGITUDE,
+    t.COUNTY_ID,
+    t.STATE_CODE,
+    t.ELEVATION_UNITS,
+    t.PROCESSING_METHOD,
+    t.CONFIDENCE_SCORE,
+    s.ELEVATION_MIN as SUMMARY_MIN,
+    s.ELEVATION_MAX as SUMMARY_MAX,
+    s.ELEVATION_MEAN as SUMMARY_MEAN,
+    s.SLOPE_DEGREES,
+    s.ASPECT_DEGREES,
+    s.TERRAIN_ROUGHNESS,
+    t.CREATED_AT,
+    t.UPDATED_AT
+FROM TOPOGRAPHY t
+LEFT JOIN TOPOGRAPHY_SUMMARY s ON t.PARCEL_ID = s.PARCEL_ID
+ORDER BY t.PARCEL_ID;
+
+CREATE OR REPLACE VIEW VW_ELEVATION_STATISTICS AS
+SELECT 
+    COUNT(*) as TOTAL_PARCELS,
+    AVG(ELEVATION_MEAN) as AVG_ELEVATION,
+    MIN(ELEVATION_MIN) as OVERALL_MIN_ELEVATION,
+    MAX(ELEVATION_MAX) as OVERALL_MAX_ELEVATION,
+    STDDEV(ELEVATION_MEAN) as ELEVATION_STD_DEV,
+    COUNT(CASE WHEN ELEVATION_MEAN < 100 THEN 1 END) as LOW_ELEVATION_PARCELS,
+    COUNT(CASE WHEN ELEVATION_MEAN BETWEEN 100 AND 500 THEN 1 END) as MID_ELEVATION_PARCELS,
+    COUNT(CASE WHEN ELEVATION_MEAN > 500 THEN 1 END) as HIGH_ELEVATION_PARCELS,
+    AVG(SLOPE_DEGREES) as AVG_SLOPE,
+    COUNT(CASE WHEN SLOPE_DEGREES > 15 THEN 1 END) as STEEP_SLOPE_PARCELS
+FROM TOPOGRAPHY_SUMMARY;
+
+-- Create stored procedures for common operations
+CREATE OR REPLACE PROCEDURE SP_UPDATE_TOPOGRAPHY_SUMMARY(PARCEL_ID_PARAM VARCHAR(100))
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+DECLARE
+    result_msg STRING;
+    elevation_count INTEGER;
+BEGIN
+    -- Get count of elevation points for this parcel
+    SELECT COUNT(*) INTO elevation_count FROM TOPOGRAPHY WHERE PARCEL_ID = PARCEL_ID_PARAM;
+    
+    IF (elevation_count = 0) THEN
+        RETURN 'No topography data found for parcel: ' || PARCEL_ID_PARAM;
+    END IF;
+    
+    -- Delete existing summary
+    DELETE FROM TOPOGRAPHY_SUMMARY WHERE PARCEL_ID = PARCEL_ID_PARAM;
+    
+    -- Insert new summary with calculated statistics
+    INSERT INTO TOPOGRAPHY_SUMMARY (
+        PARCEL_ID, ELEVATION_MIN, ELEVATION_MAX, ELEVATION_MEAN, 
+        ELEVATION_MEDIAN, ELEVATION_STD, ELEVATION_UNITS, ELEVATION_POINTS_COUNT,
+        DATA_SOURCE, PROCESSING_METHOD
+    )
+    SELECT 
+        PARCEL_ID_PARAM,
+        MIN(MEAN_ELEVATION_FT) as ELEVATION_MIN,
+        MAX(MAX_ELEVATION_FT) as ELEVATION_MAX,
+        AVG(MEAN_ELEVATION_FT) as ELEVATION_MEAN,
+        MEDIAN(MEAN_ELEVATION_FT) as ELEVATION_MEDIAN,
+        STDDEV(MEAN_ELEVATION_FT) as ELEVATION_STD,
+        MAX(ELEVATION_UNITS) as ELEVATION_UNITS,
+        COUNT(*) as ELEVATION_POINTS_COUNT,
+        MAX(DATA_SOURCE) as DATA_SOURCE,
+        MAX(PROCESSING_METHOD) as PROCESSING_METHOD
+    FROM TOPOGRAPHY
+    WHERE PARCEL_ID = PARCEL_ID_PARAM
+    AND MEAN_ELEVATION_FT IS NOT NULL;
+    
+    result_msg := 'Topography summary updated for parcel: ' || PARCEL_ID_PARAM || ' (' || elevation_count || ' points)';
+    RETURN result_msg;
+END;
+$$;
+
+-- Create function to get parcel topography summary
+CREATE OR REPLACE FUNCTION FN_GET_TOPOGRAPHY_JSON(PARCEL_ID_PARAM VARCHAR(100))
+RETURNS OBJECT
+LANGUAGE SQL
+AS
+$$
+    SELECT OBJECT_CONSTRUCT(
+        'parcel_id', PARCEL_ID_PARAM,
+        'summary', (
+            SELECT OBJECT_CONSTRUCT(
+                'elevation_min', ELEVATION_MIN,
+                'elevation_max', ELEVATION_MAX,
+                'elevation_mean', ELEVATION_MEAN,
+                'elevation_median', ELEVATION_MEDIAN,
+                'elevation_std', ELEVATION_STD,
+                'elevation_units', ELEVATION_UNITS,
+                'points_count', ELEVATION_POINTS_COUNT,
+                'slope_degrees', SLOPE_DEGREES,
+                'aspect_degrees', ASPECT_DEGREES,
+                'terrain_roughness', TERRAIN_ROUGHNESS,
+                'data_source', DATA_SOURCE,
+                'processing_method', PROCESSING_METHOD,
+                'last_processed', LAST_PROCESSED_AT
+            )
+            FROM TOPOGRAPHY_SUMMARY 
+            WHERE PARCEL_ID = PARCEL_ID_PARAM
+        ),
+        'elevation_points', (
+            SELECT ARRAY_AGG(
+                OBJECT_CONSTRUCT(
+                    'topo_id', TOPO_ID,
+                    'mean_elevation_ft', MEAN_ELEVATION_FT,
+                    'min_elevation_ft', MIN_ELEVATION_FT,
+                    'max_elevation_ft', MAX_ELEVATION_FT,
+                    'elevation_variance_ft', ELEVATION_VARIANCE_FT,
+                    'slope_percent', SLOPE_PERCENT,
+                    'terrain_analysis', TERRAIN_ANALYSIS,
+                    'latitude', LATITUDE,
+                    'longitude', LONGITUDE,
+                    'county_id', COUNTY_ID,
+                    'state_code', STATE_CODE,
+                    'elevation_units', ELEVATION_UNITS,
+                    'data_source', DATA_SOURCE,
+                    'resolution', RESOLUTION,
+                    'collection_method', COLLECTION_METHOD,
+                    'collection_date', COLLECTION_DATE,
+                    'confidence_score', CONFIDENCE_SCORE,
+                    'created_at', CREATED_AT
+                )
+            )
+            FROM TOPOGRAPHY
+            WHERE PARCEL_ID = PARCEL_ID_PARAM
+            ORDER BY CREATED_AT DESC
+        ),
+        'terrain_analysis', (
+            SELECT OBJECT_CONSTRUCT(
+                'watershed_id', WATERSHED_ID,
+                'drainage_area_sqkm', DRAINAGE_AREA_SQKM,
+                'topographic_wetness_index', TOPOGRAPHIC_WETNESS_INDEX,
+                'topographic_position_index', TOPOGRAPHIC_POSITION_INDEX,
+                'terrain_ruggedness_index', TERRAIN_RUGGEDNESS_INDEX,
+                'viewshed_area_sqkm', VIEWSHED_AREA_SQKM,
+                'solar_radiation_potential', SOLAR_RADIATION_POTENTIAL
+            )
+            FROM TERRAIN_ANALYSIS 
+            WHERE PARCEL_ID = PARCEL_ID_PARAM
+            LIMIT 1
+        )
+    )
+$$;
+
+-- Create function to calculate slope between two elevation points
+CREATE OR REPLACE FUNCTION FN_CALCULATE_SLOPE(
+    LAT1 DECIMAL(10,8), LON1 DECIMAL(11,8), ELEV1 DECIMAL(10,2),
+    LAT2 DECIMAL(10,8), LON2 DECIMAL(11,8), ELEV2 DECIMAL(10,2)
+)
+RETURNS DECIMAL(5,2)
+LANGUAGE SQL
+AS
+$$
+    SELECT 
+        CASE 
+            WHEN LAT1 = LAT2 AND LON1 = LON2 THEN 0.0
+            ELSE ATAN2(
+                ABS(ELEV2 - ELEV1), 
+                SQRT(
+                    POWER(111319.5 * (LAT2 - LAT1), 2) + 
+                    POWER(111319.5 * COS(RADIANS(LAT1)) * (LON2 - LON1), 2)
+                )
+            ) * 180.0 / PI()
+        END
+$$;
+
+-- Create function to calculate distance between two points in meters
+CREATE OR REPLACE FUNCTION FN_CALCULATE_DISTANCE_METERS(
+    LAT1 DECIMAL(10,8), LON1 DECIMAL(11,8),
+    LAT2 DECIMAL(10,8), LON2 DECIMAL(11,8)
+)
+RETURNS DECIMAL(15,2)
+LANGUAGE SQL
+AS
+$$
+    SELECT 
+        CASE 
+            WHEN LAT1 = LAT2 AND LON1 = LON2 THEN 0.0
+            ELSE 6371000.0 * ACOS(
+                COS(RADIANS(LAT1)) * COS(RADIANS(LAT2)) * 
+                COS(RADIANS(LON2) - RADIANS(LON1)) + 
+                SIN(RADIANS(LAT1)) * SIN(RADIANS(LAT2))
+            )
+        END
+$$;
+
+-- Create trigger to automatically update TOPOGRAPHY_SUMMARY when TOPOGRAPHY is modified
+CREATE OR REPLACE PROCEDURE SP_TRIGGER_UPDATE_SUMMARY()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    -- This would be called by application logic since Snowflake doesn't support triggers
+    -- Application should call SP_UPDATE_TOPOGRAPHY_SUMMARY after inserting/updating TOPOGRAPHY
+    RETURN 'Summary update trigger logic - call SP_UPDATE_TOPOGRAPHY_SUMMARY';
+END;
+$$;
+
+-- Grant permissions (adjust as needed for your security model)
+GRANT USAGE ON SCHEMA TEDDY_DATA.RAW TO ROLE ACCOUNTADMIN;
+GRANT ALL ON ALL TABLES IN SCHEMA TEDDY_DATA.RAW TO ROLE ACCOUNTADMIN;
+GRANT ALL ON ALL VIEWS IN SCHEMA TEDDY_DATA.RAW TO ROLE ACCOUNTADMIN;
+GRANT ALL ON ALL PROCEDURES IN SCHEMA TEDDY_DATA.RAW TO ROLE ACCOUNTADMIN;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA TEDDY_DATA.RAW TO ROLE ACCOUNTADMIN;
+
+-- Insert test data verification
+SELECT 'Topography schema setup completed successfully!' as STATUS;
+
+-- Show created objects
+SHOW TABLES IN SCHEMA TEDDY_DATA.RAW;
+SHOW VIEWS IN SCHEMA TEDDY_DATA.RAW;
+SHOW PROCEDURES IN SCHEMA TEDDY_DATA.RAW;
+SHOW FUNCTIONS IN SCHEMA TEDDY_DATA.RAW;
