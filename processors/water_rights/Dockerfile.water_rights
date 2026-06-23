@@ -1,0 +1,18 @@
+# Docker build for Water Rights Lambda function (Dataset 5)
+FROM public.ecr.aws/lambda/python:3.9
+
+COPY processors/water_rights/water_rights_parcel_processor.py ${LAMBDA_TASK_ROOT}/
+COPY processors/water_rights/water_rights_client.py ${LAMBDA_TASK_ROOT}/
+COPY processors/shared/utils/ ${LAMBDA_TASK_ROOT}/shared/utils/
+COPY processors/shared/clients/ ${LAMBDA_TASK_ROOT}/shared/clients/
+
+RUN mkdir -p ${LAMBDA_TASK_ROOT}/keys
+COPY keys/snowflake_rsa_key.p8 ${LAMBDA_TASK_ROOT}/keys/
+
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r requirements.txt
+
+ENV SNOWFLAKE_PRIVATE_KEY_PATH=${LAMBDA_TASK_ROOT}/keys/snowflake_rsa_key.p8
+ENV SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT
+
+CMD ["water_rights_parcel_processor.lambda_handler"]

@@ -358,10 +358,12 @@ class ParcelEnrichmentOrchestrator:
         # List of enrichment Lambda functions to trigger
         enrichment_functions = [
             'teddy-crop-history-enrichment',
-            'teddy-climate-data-enrichment', 
+            'teddy-climate-data-enrichment',
             'teddy-topography-enrichment',
             'teddy-land-cover-enrichment',
-            'teddy-landid-maps-enrichment'
+            'teddy-landid-maps-enrichment',
+            'teddy-usda-crop-yields-enrichment',
+            'teddy-water-rights-enrichment'
         ]
         
         for function_name in enrichment_functions:
