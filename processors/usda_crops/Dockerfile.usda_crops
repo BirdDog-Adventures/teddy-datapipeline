@@ -1,0 +1,23 @@
+# Docker build for USDA Crop Yields Lambda function (Dataset 1)
+FROM public.ecr.aws/lambda/python:3.9
+
+# Copy Lambda function code
+COPY processors/usda_crops/usda_crops_parcel_processor.py ${LAMBDA_TASK_ROOT}/
+COPY processors/usda_crops/usda_crops_client.py ${LAMBDA_TASK_ROOT}/
+COPY processors/shared/utils/ ${LAMBDA_TASK_ROOT}/shared/utils/
+COPY processors/shared/clients/ ${LAMBDA_TASK_ROOT}/shared/clients/
+
+# Copy RSA keys for Snowflake JWT authentication
+RUN mkdir -p ${LAMBDA_TASK_ROOT}/keys
+COPY keys/snowflake_rsa_key.p8 ${LAMBDA_TASK_ROOT}/keys/
+
+# Install dependencies
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Snowflake JWT authentication
+ENV SNOWFLAKE_PRIVATE_KEY_PATH=${LAMBDA_TASK_ROOT}/keys/snowflake_rsa_key.p8
+ENV SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT
+
+# Lambda handler
+CMD ["usda_crops_parcel_processor.lambda_handler"]
