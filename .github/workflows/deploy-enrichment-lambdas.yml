@@ -43,6 +43,10 @@ jobs:
             dockerfile: processors/water_rights/Dockerfile.water_rights
     steps:
       - uses: actions/checkout@v4
+      - name: Placeholder Snowflake key (build-validation only — not a real key)
+        # The Dockerfile COPYs keys/snowflake_rsa_key.p8 (gitignored secret). For a
+        # build-only dry-run a placeholder satisfies the COPY without any secret.
+        run: mkdir -p keys && printf 'placeholder' > keys/snowflake_rsa_key.p8
       - name: Dry-run build (${{ matrix.name }}) — compile only, no push
         run: docker build -f ${{ matrix.dockerfile }} -t enrichment-${{ matrix.name }}:dryrun .
 
@@ -58,6 +62,13 @@ jobs:
           - processors/water_rights/deploy-water-rights-lambda.sh
     steps:
       - uses: actions/checkout@v4
+      - name: Write Snowflake RSA key from secret
+        # Secret SNOWFLAKE_RSA_KEY_B64 = base64 of keys/snowflake_rsa_key.p8.
+        # (Follow-up: move to a runtime Secrets Manager fetch so the key isn't
+        # baked into the image — per the secrets-handling feedback.)
+        run: |
+          mkdir -p keys
+          echo "${{ secrets.SNOWFLAKE_RSA_KEY_B64 }}" | base64 -d > keys/snowflake_rsa_key.p8
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
