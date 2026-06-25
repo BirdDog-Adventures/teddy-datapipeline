@@ -71,11 +71,34 @@ parsed_parcels AS (
         parcel_json:land_use_description::STRING as land_use_description,
         parcel_json:zoning::STRING as zoning,
         
-        -- Financial information
-        parcel_json:assessed_value::NUMBER(12,2) as assessed_value,
-        parcel_json:market_value::NUMBER(12,2) as market_value,
-        parcel_json:tax_amount::NUMBER(10,2) as tax_amount,
-        parcel_json:tax_year::NUMBER(4) as tax_year,
+        -- Financial information.
+        -- Dataset-2 fix: Regrid emits native field names (parval/landval/improvval/
+        -- saleprice/taxamt/taxyear), sometimes nested under :fields, while older
+        -- ingests used generic names. COALESCE every known candidate so the column
+        -- populates regardless of which the source used (first NON-NULL wins).
+        COALESCE(
+            parcel_json:assessed_value,
+            parcel_json:assessed_total_value,
+            parcel_json:parval,
+            parcel_json:fields:parval
+        )::NUMBER(12,2) as assessed_value,
+        COALESCE(
+            parcel_json:market_value,
+            parcel_json:mktval,
+            parcel_json:fields:mktval,
+            parcel_json:saleprice,
+            parcel_json:fields:saleprice
+        )::NUMBER(12,2) as market_value,
+        COALESCE(
+            parcel_json:tax_amount,
+            parcel_json:taxamt,
+            parcel_json:fields:taxamt
+        )::NUMBER(10,2) as tax_amount,
+        COALESCE(
+            parcel_json:tax_year,
+            parcel_json:taxyear,
+            parcel_json:fields:taxyear
+        )::NUMBER(4) as tax_year,
         
         -- Geometry (stored as GeoJSON)
         parcel_json:geometry as geometry_json,
@@ -83,8 +106,16 @@ parsed_parcels AS (
         -- Additional attributes
         parcel_json:year_built::NUMBER(4) as year_built,
         parcel_json:building_count::NUMBER as building_count,
-        parcel_json:improvement_value::NUMBER(12,2) as improvement_value,
-        parcel_json:land_value::NUMBER(12,2) as land_value,
+        COALESCE(
+            parcel_json:improvement_value,
+            parcel_json:improvval,
+            parcel_json:fields:improvval
+        )::NUMBER(12,2) as improvement_value,
+        COALESCE(
+            parcel_json:land_value,
+            parcel_json:landval,
+            parcel_json:fields:landval
+        )::NUMBER(12,2) as land_value,
         
         -- Data quality indicators
         CASE 
