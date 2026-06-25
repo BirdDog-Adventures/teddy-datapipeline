@@ -1,0 +1,67 @@
+name: Enrichment Lambdas (USDA + Water Rights)
+
+# Replaces the manual `processors/*/deploy-*.sh` runs (runbook feedback):
+#   - PR touching a processor  -> DRY-RUN: build the image to prove it compiles,
+#     no push/deploy. This is the "dry-run file" gate.
+#   - Merge to master          -> DEPLOY: build, push to ECR, update the Lambda.
+#
+# Setup (one-time): set repo secret AWS_DEPLOY_ROLE_ARN to an IAM role trusted
+# for GitHub OIDC with ECR + Lambda update perms (mirror the role the scripts
+# used: TeddyDataPipeline-Lambda-dev). Region is us-east-1.
+
+on:
+  pull_request:
+    paths:
+      - 'processors/usda_crops/**'
+      - 'processors/water_rights/**'
+      - '.github/workflows/deploy-enrichment-lambdas.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'processors/usda_crops/**'
+      - 'processors/water_rights/**'
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC -> AWS
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  # Build-only validation on PRs — never deploys.
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: usda_crops
+            dockerfile: processors/usda_crops/Dockerfile.usda_crops
+          - name: water_rights
+            dockerfile: processors/water_rights/Dockerfile.water_rights
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dry-run build (${{ matrix.name }}) — compile only, no push
+        run: docker build -f ${{ matrix.dockerfile }} -t enrichment-${{ matrix.name }}:dryrun .
+
+  # Real deploy on merge to master — runs the existing per-processor scripts.
+  deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        script:
+          - processors/usda_crops/deploy-usda-crops-lambda.sh
+          - processors/water_rights/deploy-water-rights-lambda.sh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy ${{ matrix.script }}
+        run: bash ${{ matrix.script }}
